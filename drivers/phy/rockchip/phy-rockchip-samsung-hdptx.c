@@ -8,6 +8,7 @@
  */
 #include <linux/bitfield.h>
 #include <linux/clk.h>
+#include <linux/clk-provider.h>
 #include <linux/delay.h>
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
@@ -190,6 +191,8 @@
 #define LN3_TX_SER_RATE_SEL_HBR2	BIT(3)
 #define LN3_TX_SER_RATE_SEL_HBR3	BIT(2)
 
+#define HDMI20_MAX_RATE			600000000
+
 struct lcpll_config {
 	u32 bit_rate;
 	u8 lcvco_mode_en;
@@ -272,6 +275,12 @@ struct rk_hdptx_phy {
 	struct clk_bulk_data *clks;
 	int nr_clks;
 	struct reset_control_bulk_data rsts[RST_MAX];
+
+	/* clk provider */
+	struct clk_hw hw;
+	unsigned long rate;
+	int id;
+	int count;
 };
 
 static const struct ropll_config ropll_tmds_cfg[] = {
@@ -566,6 +575,11 @@ static bool rk_hdptx_phy_is_rw_reg(struct device *dev, unsigned int reg)
 	return false;
 }
 
+static struct rk_hdptx_phy *to_rk_hdptx_phy(struct clk_hw *hw)
+{
+	return container_of(hw, struct rk_hdptx_phy, hw);
+}
+
 static const struct regmap_config rk_hdptx_phy_regmap_config = {
 	.reg_bits = 32,
 	.reg_stride = 4,
@@ -759,6 +773,8 @@ static int rk_hdptx_ropll_tmds_cmn_config(struct rk_hdptx_phy *hdptx,
 	struct ropll_config rc = {0};
 	int i;
 
+	hdptx->rate = rate * 100;
+
 	for (i = 0; i < ARRAY_SIZE(ropll_tmds_cfg); i++)
 		if (rate == ropll_tmds_cfg[i].bit_rate) {
 			cfg = &ropll_tmds_cfg[i];
@@ -925,6 +941,133 @@ static int rk_hdptx_phy_runtime_resume(struct device *dev)
 	return ret;
 }
 
+static int hdptx_phy_clk_enable(struct clk_hw *hw)
+{
+	struct rk_hdptx_phy *hdptx = to_rk_hdptx_phy(hw);
+	int ret;
+
+	if (hdptx->count) {
+		hdptx->count++;
+		return 0;
+	}
+
+	ret = pm_runtime_resume_and_get(hdptx->dev);
+	if (ret) {
+		dev_err(hdptx->dev, "Failed to resume phy: %d\n", ret);
+		return ret;
+	}
+
+	if (hdptx->rate) {
+		ret = rk_hdptx_ropll_tmds_cmn_config(hdptx, hdptx->rate / 100);
+		if (ret < 0) {
+			dev_err(hdptx->dev, "Failed to init HDMI PHY PLL\n");
+			return ret;
+		}
+	}
+
+	hdptx->count++;
+
+	return 0;
+}
+
+static void hdptx_phy_clk_disable(struct clk_hw *hw)
+{
+	struct rk_hdptx_phy *hdptx = to_rk_hdptx_phy(hw);
+	int val, ret;
+
+	if (hdptx->count > 1) {
+		hdptx->count--;
+		return;
+	}
+
+	ret = regmap_read(hdptx->grf, GRF_HDPTX_STATUS, &val);
+	if (ret)
+		return;
+	if (val & HDPTX_O_PLL_LOCK_DONE)
+		rk_hdptx_phy_disable(hdptx);
+
+	pm_runtime_put(hdptx->dev);
+	hdptx->count--;
+}
+
+static unsigned long hdptx_phy_clk_recalc_rate(struct clk_hw *hw,
+					       unsigned long parent_rate)
+{
+	struct rk_hdptx_phy *hdptx = to_rk_hdptx_phy(hw);
+
+	return hdptx->rate;
+}
+
+static long hdptx_phy_clk_round_rate(struct clk_hw *hw, unsigned long rate,
+					 unsigned long *parent_rate)
+{
+	const struct ropll_config *cfg = ropll_tmds_cfg;
+	u32 bit_rate = rate / 100;
+
+	if (rate > HDMI20_MAX_RATE)
+		return rate;
+
+	for (; cfg->bit_rate != ~0; cfg++)
+		if (bit_rate == cfg->bit_rate)
+			break;
+
+	if (cfg->bit_rate == ~0 && !rk_hdptx_phy_clk_pll_calc(bit_rate, NULL))
+		return -EINVAL;
+
+	return rate;
+}
+
+static int hdptx_phy_clk_set_rate(struct clk_hw *hw, unsigned long rate,
+				      unsigned long parent_rate)
+{
+	struct rk_hdptx_phy *hdptx = to_rk_hdptx_phy(hw);
+	int val, ret;
+
+	ret = regmap_read(hdptx->grf, GRF_HDPTX_STATUS, &val);
+	if (ret)
+		return ret;
+	if (val & HDPTX_O_PLL_LOCK_DONE)
+		rk_hdptx_phy_disable(hdptx);
+
+	return rk_hdptx_ropll_tmds_cmn_config(hdptx, rate / 100);
+}
+
+static const struct clk_ops hdptx_phy_clk_ops = {
+	.enable = hdptx_phy_clk_enable,
+	.disable = hdptx_phy_clk_disable,
+	.recalc_rate = hdptx_phy_clk_recalc_rate,
+	.round_rate = hdptx_phy_clk_round_rate,
+	.set_rate = hdptx_phy_clk_set_rate,
+};
+
+static int rk_hdptx_phy_clk_register(struct rk_hdptx_phy *hdptx)
+{
+	struct device *dev = hdptx->dev;
+	const char *name, *pname;
+	struct clk *refclk;
+	int ret;
+
+	refclk = devm_clk_get(dev, "ref");
+	if (IS_ERR(refclk))
+		return dev_err_probe(dev, PTR_ERR(refclk),
+				     "Failed to get ref clock\n");
+
+	pname = __clk_get_name(refclk);
+	name = hdptx->id ? "clk_hdmiphy_pixel1" : "clk_hdmiphy_pixel0";
+	hdptx->hw.init = CLK_HW_INIT(name, pname, &hdptx_phy_clk_ops,
+				     CLK_GET_RATE_NOCACHE);
+
+	ret = devm_clk_hw_register(dev, &hdptx->hw);
+	if (ret)
+		return dev_err_probe(dev, ret, "Failed to register clock\n");
+
+	ret = devm_of_clk_add_hw_provider(dev, of_clk_hw_simple_get, &hdptx->hw);
+	if (ret)
+		return dev_err_probe(dev, ret,
+				     "Failed to register clk provider\n");
+	return 0;
+}
+
 static int rk_hdptx_phy_probe(struct platform_device *pdev)
 {
 	struct phy_provider *phy_provider;
@@ -938,6 +1081,14 @@ static int rk_hdptx_phy_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	hdptx->dev = dev;
+
+	// TODO: FIXME: It's not acceptable to abuse the alias ID in this way.
+	// The proper solution to get the ID is by looking up the device address
+	// from the DT "reg" property and map it. Examples for this are available
+	// in various other Rockchip drivers, e.g. the RK3588 USBDP PHY.
+	hdptx->id = of_alias_get_id(dev->of_node, "hdptxphy");
+	if (hdptx->id < 0)
+		hdptx->id = 0;
 
 	regs = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(regs))
@@ -997,6 +1148,10 @@ static int rk_hdptx_phy_probe(struct platform_device *pdev)
 	reset_control_deassert(hdptx->rsts[RST_APB].rstc);
 	reset_control_deassert(hdptx->rsts[RST_CMN].rstc);
 	reset_control_deassert(hdptx->rsts[RST_INIT].rstc);
+
+	ret = rk_hdptx_phy_clk_register(hdptx);
+	if (ret)
+		return ret;
 
 	return 0;
 }
