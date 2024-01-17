@@ -488,6 +488,9 @@ struct clk *rockchip_clk_register_mmc(const char *name,
  */
 #define ROCKCHIP_DDRCLK_SIP		BIT(0)
 
+void rockchip_set_ddrclk_params(void __iomem *params);
+void rockchip_set_ddrclk_dmcfreq_wait_complete(int (*func)(void));
+
 struct clk *rockchip_clk_register_ddrclk(const char *name, int flags,
 					 const char *const *parent_names,
 					 u8 num_parents, int mux_offset,
