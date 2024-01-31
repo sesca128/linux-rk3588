@@ -259,6 +259,7 @@ static struct nvmem_config otp_config = {
 	.stride = 1,
 	.word_size = 1,
 	.reg_read = rockchip_otp_read,
+	.add_legacy_fixed_of_cells = true,
 };
 
 static const char * const px30_otp_clocks[] = {
