@@ -21,7 +21,7 @@
 static const struct drm_framebuffer_funcs rockchip_drm_fb_funcs = {
 	.destroy       = drm_gem_fb_destroy,
 	.create_handle = drm_gem_fb_create_handle,
-	.dirty	       = drm_atomic_helper_dirtyfb,
+	//.dirty	       = drm_atomic_helper_dirtyfb,
 };
 
 static const struct drm_mode_config_helper_funcs rockchip_mode_config_helpers = {
