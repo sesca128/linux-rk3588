@@ -906,6 +906,8 @@ void start_kernel(void)
 	/* parameters may set static keys */
 	jump_label_init();
 	parse_early_param();
+	trap_init();
+	dbg_late_init();
 	after_dashes = parse_args("Booting kernel",
 				  static_command_line, __start___param,
 				  __stop___param - __start___param,
@@ -928,7 +930,6 @@ void start_kernel(void)
 	setup_log_buf(0);
 	vfs_caches_init_early();
 	sort_main_extable();
-	trap_init();
 	mm_core_init();
 	poking_init();
 	ftrace_init();
@@ -1051,7 +1052,6 @@ void start_kernel(void)
 	uts_ns_init();
 	key_init();
 	security_init();
-	dbg_late_init();
 	net_ns_init();
 	vfs_caches_init();
 	pagecache_init();
