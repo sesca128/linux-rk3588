@@ -9,6 +9,8 @@
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
 #include <linux/syscore_ops.h>
+#include <linux/pm.h>
+#include <linux/pm_clock.h>
 #include <dt-bindings/clock/rockchip,rk3588-cru.h>
 #include "clk.h"
 
@@ -2514,12 +2516,17 @@ static const struct of_device_id clk_rk3588_match_table[] = {
 	{ }
 };
 
+static const struct dev_pm_ops rockchip_clk_link_pm_ops = {
+	SET_RUNTIME_PM_OPS(pm_clk_suspend, pm_clk_resume, NULL)
+};
+
 static struct platform_driver clk_rk3588_driver = {
 	.probe		= clk_rk3588_probe,
 	.driver		= {
 		.name	= "clk-rk3588",
 		.of_match_table = clk_rk3588_match_table,
 		.suppress_bind_attrs = true,
+		.pm = &rockchip_clk_link_pm_ops,
 	},
 };
 

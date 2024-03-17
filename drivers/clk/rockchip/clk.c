@@ -462,7 +462,19 @@ static struct platform_device *rockchip_clk_register_pdev(
 		.of_node_reused = true,
 	};
 
-	return platform_device_register_full(&pdevinfo);
+	struct platform_device *pdev = platform_device_register_full(&pdevinfo);
+
+	if (!pdev)
+		return NULL;
+
+	pdev->dev.driver = parent->dev.driver;
+	int err = device_bind_driver(&pdev->dev);
+
+	if (err){
+		pr_warn("rockchip_clk: Error binding driver!\n");
+	}
+
+	return pdev;
 }
 
 static struct clk *rockchip_clk_register_linked_gate(
